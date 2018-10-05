@@ -2,9 +2,10 @@
   "compilerOptions": {
     "outDir": "./dist/",
     "noImplicitAny": true,
+    "target": "esnext",
     "module": "esnext",
     "declarationMap": true,
     "declaration": true,
-    "lib": ["es2015"]
+    "lib": ["es2015", "esnext"]
   }
 }

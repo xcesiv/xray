@@ -39,7 +39,7 @@ export enum FileStatus {
 }
 
 export interface IoProvider {
-  getBaseEntries(oid: Oid): AsyncIterator<ReadonlyArray<BaseEntry>>;
+  getBaseEntries(oid: Oid): AsyncIterable<ReadonlyArray<BaseEntry>>;
   getText(oid: Oid, path: string): Promise<string>;
 }
 
@@ -76,6 +76,8 @@ export class WorkTree {
   private static rootFileId: FileId;
   private id: number;
   private replicaId: number;
+  private io: IoProvider;
+  private nextResetId: number;
 
   static getRootFileId(): FileId {
     if (!WorkTree.rootFileId) {
@@ -84,7 +86,7 @@ export class WorkTree {
     return WorkTree.rootFileId;
   }
 
-  private constructor(replicaId: number, io: IoProvider) {
+  constructor(replicaId: number, io: IoProvider) {
     if (replicaId <= 0) {
       throw new Error("Replica id must be positive");
     }
@@ -101,14 +103,49 @@ export class WorkTree {
     return request({ tree_id: this.id, type: "GetVersion" }).version;
   }
 
-  appendBaseEntries(
-    baseEntries: ReadonlyArray<BaseEntry>
-  ): ReadonlyArray<Operation> {
-    return request({
-      type: "AppendBaseEntries",
-      tree_id: this.id,
-      entries: baseEntries
-    }).operations;
+  async *init(head: Oid): AsyncIterable<ReadonlyArray<Operation>> {
+    yield this.startEpoch(head);
+    for await (const entries of this.io.getBaseEntries(head)) {
+      yield this.appendBaseEntries(entries);
+    }
+  }
+
+  async reset(
+    newHead: Oid,
+    prevEpochEnd: Version
+  ): Promise<ReadonlyArray<Operation>> {
+    const resetId = ++this.nextResetId;
+
+    const newTree = new WorkTree(this.replicaId, this.io);
+    for await (const entries of this.io.getBaseEntries(newHead)) {
+      newTree.appendBaseEntries(entries);
+    }
+
+    const processedPaths = new Set();
+    while (true) {
+      let yielded = false;
+      for (const path of this.changedPathsSince(prevEpochEnd)) {
+        if (!processedPaths.has(path) && newTree.hasPath(path)) {
+          yielded = true;
+          newTree.openTextFile(
+            newTree.fileIdForPath(path),
+            await this.io.getText(newHead, path)
+          );
+        }
+
+        processedPaths.add(path);
+      }
+
+      if (!yielded) break;
+    }
+
+    if (resetId == this.nextResetId) {
+      let ops = newTree.startEpoch(newHead, this);
+      this.id = newTree.id;
+      return ops;
+    } else {
+      return [];
+    }
   }
 
   applyOps(operations: ReadonlyArray<Operation>): ReadonlyArray<Operation> {
@@ -163,6 +200,14 @@ export class WorkTree {
   fileIdForPath(path: string): FileId {
     return request({
       type: "FileIdForPath",
+      tree_id: this.id,
+      path
+    }).file_id;
+  }
+
+  hasPath(path: string): boolean {
+    return request({
+      type: "HasPath",
       tree_id: this.id,
       path
     }).file_id;
@@ -230,6 +275,14 @@ export class WorkTree {
     return response.operation;
   }
 
+  changedPathsSince(version: Version): ReadonlyArray<string> {
+    return request({
+      type: "ChangedPathsSince",
+      tree_id: this.id,
+      version
+    }).paths;
+  }
+
   changesSince(
     bufferId: BufferId,
     version: Version
@@ -242,45 +295,25 @@ export class WorkTree {
     }).changes;
   }
 
-  async init(head: Oid): AsyncIterator<ReadonlyArray<Operation>> {
-    yield this.startEpoch(head);
-    for await (const entries of this.io.getBaseEntries(head)) {
-      yield this.appendBaseEntries(entries);
-    }
+  private appendBaseEntries(
+    baseEntries: ReadonlyArray<BaseEntry>
+  ): ReadonlyArray<Operation> {
+    return request({
+      type: "AppendBaseEntries",
+      tree_id: this.id,
+      entries: baseEntries
+    }).operations;
   }
 
-  async reset(newHead: Oid): Promise<ReadonlyArray<Operation>> {
-    const resetId = ++this.nextResetId;
-
-    const newTree = new WorkTree(this.replicaId, this.io);
-    for await (const entries of this.io.getBaseEntries(head)) {
-      newTree.appendBaseEntries(entries);
-    }
-
-    const processedPaths = new Set();
-    while (true) {
-      let yielded = false;
-      for (const path of this.tree.getUnsavedPaths()) {
-        if (!processedPaths.has(path) && newTree.hasPath(path)) {
-          yielded = true;
-          newTree.openTextFile(
-            newTree.fileIdForPath(path),
-            await this.io.getText(newHead, path)
-          );
-        }
-
-        processedPaths.add(path);
-      }
-
-      if (!yielded) break;
-    }
-
-    if (resetId == this.nextResetId) {
-      let ops = newTree.startEpoch(newHead, this.tree);
-      this.id = newTree.id;
-      return ops;
-    } else {
-      return [];
-    }
+  private startEpoch(
+    newHead: Oid,
+    oldTree?: WorkTree
+  ): ReadonlyArray<Operation> {
+    return request({
+      type: "StartEpoch",
+      tree_id: this.id,
+      new_head: newHead,
+      old_tree_id: oldTree ? oldTree.id : null
+    }).operations;
   }
 }
