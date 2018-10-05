@@ -6,6 +6,7 @@
     "module": "esnext",
     "declarationMap": true,
     "declaration": true,
-    "lib": ["es2015", "esnext"]
+    "lib": ["es2015", "esnext"],
+    "types": ["mocha", "node"]
   }
 }

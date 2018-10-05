@@ -1,14 +1,18 @@
-const memo = require("../dist/index.node.js");
-const assert = require("assert");
+import * as memo from "../src/index";
+import * as assert from 'assert';
 
 suite("WorkTree", () => {
-  let WorkTree;
+  let WorkTree: typeof memo.WorkTree;
 
   suiteSetup(async () => {
     ({ WorkTree } = await memo.init());
   });
 
   test("basic API interaction", () => {
+    // WIP: We need to set up the IO provider with a simulated repo state.
+    const ioProvider = new IoProvider();
+
+
     const rootFileId = WorkTree.getRootFileId();
     const baseEntries = [
       { depth: 1, name: "a", type: "Directory" },
@@ -117,6 +121,16 @@ suite("WorkTree", () => {
   });
 });
 
-function point(row, column) {
+class IoProvider implements memo.IoProvider {
+  getBaseEntries(oid: memo.Oid): AsyncIterable<ReadonlyArray<BaseEntry>> {
+
+  }
+
+  getText(oid: memo.Oid, path: string): Promise<string> {
+
+  }
+}
+
+function point(row: number, column: number): memo.Point {
   return { row, column };
 }
