@@ -27,6 +27,7 @@ pub struct WorkTree {
     lamport_clock: time::Lamport,
     text_files: HashMap<FileId, TextFile>,
     deferred_ops: OperationQueue<Operation>,
+    deferred_replicas: HashSet<ReplicaId>,
 }
 
 pub struct Cursor {
@@ -199,6 +200,7 @@ impl WorkTree {
             lamport_clock: time::Lamport::new(replica_id),
             text_files: HashMap::new(),
             deferred_ops: OperationQueue::new(),
+            deferred_replicas: HashSet::new(),
         }
     }
 
@@ -286,6 +288,9 @@ impl WorkTree {
         for file_id in name_conflicts {
             fixup_ops.extend(self.fix_name_conflicts(file_id));
         }
+
+        println!("{:?} - Flushing deferred (append_base_entries)", self.local_clock.replica_id);
+        self.deferred_replicas.clear();
         let deferred_ops = self.deferred_ops.drain();
         fixup_ops.extend(self.apply_ops_internal(deferred_ops)?);
 
@@ -298,8 +303,12 @@ impl WorkTree {
     {
         let mut fixup_ops = Vec::new();
         fixup_ops.extend(self.apply_ops_internal(ops)?);
+
+        println!("{:?} - Flushing deferred (apply_ops)", self.local_clock.replica_id);
+        self.deferred_replicas.clear();
         let deferred_ops = self.deferred_ops.drain();
         fixup_ops.extend(self.apply_ops_internal(deferred_ops)?);
+
         Ok(fixup_ops)
     }
 
@@ -317,23 +326,44 @@ impl WorkTree {
         let mut potential_conflicts = HashSet::new();
 
         for op in ops {
-            if new_tree.can_apply_op(&op) {
-                match &op {
-                    Operation::InsertMetadata {
-                        file_id, parent, ..
-                    } => {
-                        if parent.is_some() {
-                            potential_conflicts.insert(*file_id);
+            if !new_tree.version.observed(op.local_timestamp()) {
+                if new_tree.can_apply_op(&op) {
+                    match &op {
+                        Operation::InsertMetadata {
+                            file_id, parent, ..
+                        } => {
+                            if parent.is_some() {
+                                potential_conflicts.insert(*file_id);
+                            }
                         }
+                        Operation::UpdateParent { child_id, .. } => {
+                            potential_conflicts.insert(*child_id);
+                        }
+                        _ => {}
                     }
-                    Operation::UpdateParent { child_id, .. } => {
-                        potential_conflicts.insert(*child_id);
-                    }
-                    _ => {}
+                    println!(
+                        "{:?} - Applying {:?}",
+                        new_tree.local_clock.replica_id,
+                        op.local_timestamp()
+                    );
+                    new_tree.apply_op(op)?;
+                } else {
+                    println!(
+                        "{:?} - Deferring {:?}",
+                        new_tree.local_clock.replica_id,
+                        op.local_timestamp()
+                    );
+                    new_tree
+                        .deferred_replicas
+                        .insert(op.local_timestamp().replica_id);
+                    deferred_ops.push(op);
                 }
-                new_tree.apply_op(op)?;
             } else {
-                deferred_ops.push(op);
+                println!(
+                    "{:?} - Discarding {:?}",
+                    new_tree.local_clock.replica_id,
+                    op.local_timestamp()
+                );
             }
         }
         new_tree.deferred_ops.insert(deferred_ops);
@@ -486,10 +516,17 @@ impl WorkTree {
     }
 
     fn can_apply_op(&self, op: &Operation) -> bool {
-        match op {
-            Operation::InsertMetadata { .. } => true,
-            Operation::UpdateParent { child_id, .. } => self.metadata(*child_id).is_ok(),
-            Operation::EditText { file_id, .. } => self.metadata(*file_id).is_ok(),
+        if self
+            .deferred_replicas
+            .contains(&op.local_timestamp().replica_id)
+        {
+            false
+        } else {
+            match op {
+                Operation::InsertMetadata { .. } => true,
+                Operation::UpdateParent { child_id, .. } => self.metadata(*child_id).is_ok(),
+                Operation::EditText { file_id, .. } => self.metadata(*file_id).is_ok(),
+            }
         }
     }
 
@@ -1665,9 +1702,10 @@ mod tests {
 
     #[test]
     fn test_replication_random() {
-        const PEERS: usize = 5;
+        const PEERS: usize = 2;
 
-        for seed in 0..100 {
+        for seed in 0..1 {
+            let seed = 286;
             println!("SEED: {:?}", seed);
             let mut rng = StdRng::from_seed(&[seed]);
 
@@ -1691,7 +1729,7 @@ mod tests {
             let mut all_ops = Vec::new();
 
             // Generate and deliver random mutations
-            for _ in 0..10 {
+            for _ in 0..4 {
                 let k = rng.gen_range(0, 10);
                 let replica_index = rng.gen_range(0, PEERS);
                 let tree = &mut trees[replica_index];
@@ -1779,6 +1817,10 @@ mod tests {
                 }
             }
 
+            for i in 0..PEERS {
+                assert!(trees[i].deferred_ops.is_empty());
+            }
+
             for i in 0..PEERS - 1 {
                 assert_eq!(trees[i].entries(), trees[i + 1].entries());
             }
@@ -1807,8 +1849,11 @@ mod tests {
                                     }
                                 })
                                 .unwrap_or(0);
+
+                            // for _ in 0..rng.gen_range(1, 4) {
                             let insertion_index = rng.gen_range(min_index, inbox.len() + 1);
                             inbox.insert(insertion_index, op.clone());
+                            // }
                         }
                     }
                 }

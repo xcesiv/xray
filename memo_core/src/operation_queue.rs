@@ -18,6 +18,11 @@ impl<T: Operation> OperationQueue<T> {
         OperationQueue(Tree::new())
     }
 
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn insert<I>(&mut self, ops: I)
     where
         I: IntoIterator<Item = T>,
